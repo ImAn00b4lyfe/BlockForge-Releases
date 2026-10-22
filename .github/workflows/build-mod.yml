@@ -1,0 +1,415 @@
+name: Build generated Minecraft mod
+run-name: BlockForge ${{ inputs.build_id }}
+on:
+  workflow_dispatch:
+    inputs:
+      build_id:
+        description: Unique build correlation identifier
+        required: true
+        type: string
+      project_json:
+        description: Base64-encoded JSON array of generated project files
+        required: true
+        type: string
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+      - name: Write generated project files safely
+        env:
+          PROJECT_JSON_B64: ${{ inputs.project_json }}
+        run: |
+          python3 - <<'PY'
+          import base64, gzip, json, os
+          raw = base64.b64decode(os.environ["PROJECT_JSON_B64"])
+          # The website gzip-compresses large projects; plain base64 JSON still works.
+          if raw[:2] == bytes([0x1f, 0x8b]):
+              raw = gzip.decompress(raw)
+          files = json.loads(raw)
+          if not isinstance(files, list) or not files or len(files) > 90:
+              raise SystemExit("Invalid project file list")
+          root = os.path.realpath("generated-mod")
+          os.makedirs(root, exist_ok=True)
+          for item in files:
+              path = item.get("path", "")
+              code = item.get("code", "")
+              if not isinstance(path, str) or not isinstance(code, str) or not path or path.startswith("/") or chr(92) in path:
+                  raise SystemExit("Invalid file path or content")
+              dest = os.path.realpath(os.path.join(root, path))
+              if not dest.startswith(root + os.sep):
+                  raise SystemExit("Unsafe project path")
+              os.makedirs(os.path.dirname(dest), exist_ok=True)
+              # Older desktop versions strip the encoding field from imported projects.
+              # Recover only PNG files with a valid base64-encoded PNG signature.
+              looks_like_png = path.lower().endswith(".png") and code.startswith("iVBORw0KGgo")
+              if item.get("encoding") == "base64" or looks_like_png:
+                  raw = base64.b64decode(code, validate=True)
+                  if path.lower().endswith(".png") and not raw.startswith(bytes.fromhex("89504e470d0a1a0a")):
+                      raise SystemExit("Invalid PNG signature: " + path)
+                  with open(dest, "wb") as f:
+                      f.write(raw)
+              else:
+                  with open(dest, "w", encoding="utf-8") as f:
+                      f.write(code)
+          PY
+      - name: Render drawn pixel-art and UV-box textures
+        run: |
+          python3 - <<'PY'
+          # Handles *.texture.json specs that contain "pixels" (hand-drawn icons/tiles) and/or
+          # "boxes" (cuboid UV paint for worn armor layers and mob skins). Specs with neither are
+          # left for the older shaped-palette renderer in the next step.
+          import os, json, struct, zlib, hashlib
+          def hexrgb(c):
+              c = c.lstrip("#")
+              return (int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16))
+          def shade(rgb, f):
+              return tuple(max(0, min(255, int(v * f))) for v in rgb)
+          def jitter(seed, x, y, amount):
+              h = hashlib.sha256((seed + ":" + str(x) + ":" + str(y)).encode()).digest()[0]
+              return 1 + (h / 255.0 - 0.5) * 2 * amount
+          def write_png(path, w, h, px):
+              raw = bytearray()
+              for y in range(h):
+                  raw.append(0)
+                  for x in range(w):
+                      raw.extend(bytes(px[y][x]))
+              def chunk(kind, data):
+                  return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xffffffff)
+              png = bytes.fromhex("89504e470d0a1a0a") + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(bytes(raw))) + chunk(b"IEND", b"")
+              with open(path, "wb") as f:
+                  f.write(png)
+          LIGHT = {"top": 1.15, "front": 1.0, "right": 0.92, "left": 0.85, "back": 0.8, "bottom": 0.65}
+          def render(spec, name):
+              size = spec.get("size", [16, 16])
+              w = max(1, min(256, int(size[0])))
+              h = max(1, min(256, int(size[1])))
+              seed = str(spec.get("seed", name))[:128]
+              px = [[(0, 0, 0, 0) for _ in range(w)] for _ in range(h)]
+              base = spec.get("base")
+              if isinstance(base, str) and base.startswith("#") and len(base) == 7:
+                  b = hexrgb(base)
+                  for y in range(h):
+                      for x in range(w):
+                          px[y][x] = shade(b, jitter(seed, x, y, 0.05)) + (255,)
+              legend = spec.get("legend", {})
+              ox, oy = spec.get("origin", [0, 0])
+              for j, row in enumerate(spec.get("pixels", [])):
+                  for i, ch in enumerate(row):
+                      c = legend.get(ch)
+                      if ch == "." or not c:
+                          continue
+                      X, Y = ox + i, oy + j
+                      if 0 <= X < w and 0 <= Y < h:
+                          px[Y][X] = hexrgb(c) + (255,)
+              for bx in spec.get("boxes", []):
+                  u, v, bw, bh, bd = [int(bx.get(k, 0)) for k in ("u", "v", "w", "h", "d")]
+                  colors = bx.get("colors", {})
+                  allc = colors.get("all", "#808080")
+                  noise = float(bx.get("noise", 0.05))
+                  faces = {
+                      "right": (u, v + bd, bd, bh),
+                      "front": (u + bd, v + bd, bw, bh),
+                      "left": (u + bd + bw, v + bd, bd, bh),
+                      "back": (u + 2 * bd + bw, v + bd, bw, bh),
+                      "top": (u + bd, v, bw, bd),
+                      "bottom": (u + bd + bw, v, bw, bd),
+                  }
+                  for fname, (fx, fy, fw, fh) in faces.items():
+                      col = hexrgb(colors.get(fname, allc))
+                      for y in range(fh):
+                          for x in range(fw):
+                              X, Y = fx + x, fy + y
+                              if 0 <= X < w and 0 <= Y < h:
+                                  f = LIGHT[fname] * jitter(seed + fname, X, Y, noise)
+                                  if x == 0 or y == 0 or x == fw - 1 or y == fh - 1:
+                                      f *= 0.9
+                                  px[Y][X] = shade(col, f) + (255,)
+                  for dt in bx.get("details", []):
+                      fname = dt.get("face", "front")
+                      if fname not in faces or "rect" not in dt or "fill" not in dt:
+                          continue
+                      fx, fy, fw, fh = faces[fname]
+                      rx, ry, rw, rh = [int(n) for n in dt["rect"]]
+                      col = hexrgb(dt["fill"])
+                      for y in range(rh):
+                          for x in range(rw):
+                              if dt.get("shape") == "ellipse":
+                                  cx = (rw - 1) / 2.0
+                                  cy = (rh - 1) / 2.0
+                                  if ((x - cx) / (max(rw, 1) / 2.0)) ** 2 + ((y - cy) / (max(rh, 1) / 2.0)) ** 2 > 1:
+                                      continue
+                              if rx + x >= fw or ry + y >= fh:
+                                  continue
+                              X, Y = fx + rx + x, fy + ry + y
+                              if 0 <= X < w and 0 <= Y < h:
+                                  px[Y][X] = col + (255,)
+              return w, h, px
+          root = "generated-mod/src/main/resources/assets"
+          for folder, _, names in os.walk(root):
+              for name in names:
+                  if not name.endswith(".texture.json"):
+                      continue
+                  src = os.path.join(folder, name)
+                  try:
+                      with open(src, encoding="utf-8") as f:
+                          spec = json.load(f)
+                  except Exception as exc:
+                      print("Unreadable texture spec", src, exc)
+                      continue
+                  if not (isinstance(spec, dict) and (spec.get("pixels") or spec.get("boxes"))):
+                      continue
+                  out = src[:-len(".texture.json")] + ".png"
+                  try:
+                      w, h, px = render(spec, name)
+                  except Exception as exc:
+                      # A bad spec should give a visible placeholder, not fail the whole build.
+                      print("Texture spec problem in", src, exc)
+                      w, h = 16, 16
+                      px = [[((255, 0, 255, 255) if (x // 8 + y // 8) % 2 == 0 else (0, 0, 0, 255)) for x in range(16)] for y in range(16)]
+                  write_png(out, w, h, px)
+                  os.remove(src)
+                  print("Rendered drawn texture:", out)
+          PY
+      - name: Render shaped pixel-art textures
+        run: |
+          python3 - <<'PY'
+          import os, json, struct, zlib, hashlib
+          root = "generated-mod/src/main/resources/assets"
+          def chunk(kind, data):
+              return struct.pack(">I",len(data))+kind+data+struct.pack(">I",zlib.crc32(kind+data)&0xffffffff)
+          def inside(shape,x,y):
+              if shape=="sword": return (6<=x<=9 and 1<=y<=10) or (5<=x<=10 and 11<=y<=12) or (7<=x<=8 and 13<=y<=15)
+              if shape=="axe": return (6<=x<=8 and 3<=y<=15) or (2<=x<=11 and 2<=y<=7 and (x>=4 or 3<=y<=6))
+              if shape=="hammer": return (6<=x<=8 and 6<=y<=15) or (2<=x<=12 and 2<=y<=7)
+              if shape=="helmet": return (3<=x<=12 and 2<=y<=11 and not (5<=x<=10 and 8<=y<=11)) or (3<=x<=4 and 8<=y<=13) or (11<=x<=12 and 8<=y<=13)
+              if shape=="chestplate": return (4<=x<=11 and 3<=y<=14) or (1<=x<=4 and 4<=y<=9) or (11<=x<=14 and 4<=y<=9)
+              if shape=="leggings": return (3<=x<=12 and 2<=y<=7) or (3<=x<=6 and 8<=y<=15) or (9<=x<=12 and 8<=y<=15)
+              if shape=="boots": return (3<=x<=6 and 2<=y<=11) or (9<=x<=12 and 2<=y<=11) or (1<=x<=6 and 12<=y<=14) or (9<=x<=14 and 12<=y<=14)
+              if shape=="gem": return abs(x-7.5)+abs(y-7.5)<=6
+              if shape=="orb": return (x-7.5)**2+(y-7.5)**2<=40
+              return True
+          for folder,_,names in os.walk(root):
+              for name in names:
+                  if not name.endswith(".texture.json"): continue
+                  src=os.path.join(folder,name)
+                  with open(src,encoding="utf-8") as f: spec=json.load(f)
+                  colors=spec.get("palette",["#777777","#999999","#555555"])
+                  if not isinstance(colors,list) or not 1<=len(colors)<=12 or any(not isinstance(c,str) or len(c)!=7 or not c.startswith("#") for c in colors):
+                      raise ValueError("Texture requires 1-12 hex palette colors")
+                  palette=[bytes.fromhex(c[1:]) for c in colors]
+                  seed=str(spec.get("seed",name))[:128].lower()
+                  shape=str(spec.get("shape","auto")).lower()
+                  if shape=="auto":
+                      shape=next((word for word in ("chestplate","leggings","helmet","boots","hammer","sword","axe","gem","orb") if word in seed.lower() or word in name.lower()),"tile")
+                  if shape not in ("tile","sword","axe","hammer","helmet","chestplate","leggings","boots","gem","orb"):
+                      shape="tile"
+                  rows=[]
+                  for y in range(16):
+                      row=bytearray([0])
+                      for x in range(16):
+                          if not inside(shape,x,y):
+                              row.extend(b"\x00\x00\x00\x00")
+                              continue
+                          h=hashlib.sha256(f"{seed}:{x//3}:{y//3}".encode()).digest()[0]
+                          edge=not all(inside(shape,x+dx,y+dy) for dx,dy in ((-1,0),(1,0),(0,-1),(0,1)))
+                          highlight=(x+y)%9==0 or (x<7 and y%5==0)
+                          index=(len(palette)-1 if edge and len(palette)>2 else (1 if highlight and len(palette)>1 else h%len(palette)))
+                          row.extend(palette[index]+b"\xff")
+                      rows.append(bytes(row))
+                  png=bytes.fromhex("89504e470d0a1a0a")+chunk(b"IHDR",struct.pack(">IIBBBBB",16,16,8,6,0,0,0))+chunk(b"IDAT",zlib.compress(b"".join(rows)))+chunk(b"IEND",b"")
+                  with open(src[:-len(".texture.json")]+".png","wb") as f:f.write(png)
+                  os.remove(src)
+                  print("Rendered",shape,"texture:",src)
+          PY
+      - name: Render procedural worn armor textures
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, struct, zlib
+          root = "generated-mod/src/main/resources/assets"
+          def chunk(kind, data):
+              return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xffffffff)
+          for folder, _, names in os.walk(root):
+              for name in names:
+                  if not name.endswith(".armor.json"):
+                      continue
+                  src = os.path.join(folder, name)
+                  if "/textures/entity/equipment/" not in src.replace(os.sep, "/"):
+                      raise ValueError("Armor texture spec must be in textures/entity/equipment/")
+                  with open(src, encoding="utf-8") as f:
+                      spec = json.load(f)
+                  colors = spec.get("palette", ["#B72E24", "#E8B94C", "#5C1718"])
+                  if not isinstance(colors, list) or len(colors) < 2 or len(colors) > 12 or any(not isinstance(c, str) or len(c) != 7 or not c.startswith("#") for c in colors):
+                      raise ValueError("Armor palette requires 2-12 hex colors")
+                  palette = [bytes.fromhex(c[1:]) for c in colors]
+                  seed = str(spec.get("seed", name))[:128]
+                  width, height = 64, 32
+                  rows = []
+                  for y in range(height):
+                      row = bytearray([0])
+                      for x in range(width):
+                          # Minecraft's armor UV atlas: keep transparent unused space and add panel detailing.
+                          occupied = (0 <= y < 16 and 0 <= x < 64) or (16 <= y < 32 and 0 <= x < 48)
+                          if not occupied:
+                              row.extend(b"\x00\x00\x00\x00")
+                              continue
+                          # Consistent panel plating instead of random color noise.
+                          # Mirror the pattern across each UV segment for coherent armor.
+                          u=x%16
+                          v=y%16
+                          rim=u in (0,1,14,15) or v in (0,1,14,15)
+                          seam=u in (4,11) and 3<=v<=12
+                          central=6<=u<=9 and 5<=v<=10
+                          index=1 if rim or central else (2 if len(palette)>2 and seam else 0)
+                          row.extend(palette[index] + bytes([255]))
+                      rows.append(bytes(row))
+                  png = bytes.fromhex("89504e470d0a1a0a") + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(b"".join(rows))) + chunk(b"IEND", b"")
+                  target = src[:-len(".armor.json")] + ".png"
+                  with open(target, "wb") as f:
+                      f.write(png)
+                  os.remove(src)
+                  print("Generated worn armor texture:", target)
+                  # Fabric 1.21.1 renders armor from legacy textures/models/armor paths.
+                  # The equipment/ layout above is for newer Minecraft versions.
+                  import shutil
+                  layer = "2" if "/humanoid_leggings/" in target.replace(os.sep, "/") else "1"
+                  namespace_root = target.split(os.sep + "textures" + os.sep)[0]
+                  legacy_dir = os.path.join(namespace_root, "textures", "models", "armor")
+                  os.makedirs(legacy_dir, exist_ok=True)
+                  legacy_name = os.path.basename(target)[:-4] + "_layer_" + layer + ".png"
+                  shutil.copyfile(target, os.path.join(legacy_dir, legacy_name))
+                  print("Generated 1.21.1 armor texture:", os.path.join(legacy_dir, legacy_name))
+          PY
+      - name: Ensure legacy Minecraft 1.21.1 equipped armor textures
+        run: |
+          python3 - <<'PY'
+          import os, shutil
+          root="generated-mod/src/main/resources/assets"
+          for namespace in os.listdir(root) if os.path.isdir(root) else []:
+              nsroot=os.path.join(root,namespace)
+              for folder,layer in (("humanoid","1"),("humanoid_leggings","2")):
+                  srcdir=os.path.join(nsroot,"textures","entity","equipment",folder)
+                  if not os.path.isdir(srcdir): continue
+                  for filename in os.listdir(srcdir):
+                      if not filename.endswith(".png"): continue
+                      destdir=os.path.join(nsroot,"textures","models","armor")
+                      os.makedirs(destdir,exist_ok=True)
+                      dest=os.path.join(destdir,filename[:-4]+"_layer_"+layer+".png")
+                      shutil.copyfile(os.path.join(srcdir,filename),dest)
+                      print("Legacy armor layer:",dest)
+          PY
+      - name: Install OGG audio encoder
+        # Only needed when the mod ships procedural sound specs. A slow or hanging apt mirror must never block a build.
+        timeout-minutes: 5
+        continue-on-error: true
+        run: |
+          if find generated-mod -name '*.sound.json' | grep -q .; then
+            command -v ffmpeg >/dev/null 2>&1 || (sudo timeout 120 apt-get update -qq && sudo timeout 180 apt-get install -y -qq ffmpeg) || echo "ffmpeg install failed"
+          else
+            echo "No sound specs; skipping ffmpeg install"
+          fi
+      - name: Synthesize procedural Minecraft sound effects
+        run: |
+          python3 - <<'PY'
+          import json, math, os, random, struct, subprocess, tempfile, wave
+          root = "generated-mod/src/main/resources/assets"
+          for folder, _, names in os.walk(root):
+              for name in names:
+                  if not name.endswith(".sound.json"):
+                      continue
+                  src = os.path.join(folder, name)
+                  with open(src, encoding="utf-8") as f:
+                      spec = json.load(f)
+                  kind = spec.get("waveform", "sine")
+                  if kind not in ("sine", "triangle", "square", "saw", "noise"):
+                      raise ValueError("Unsupported sound waveform")
+                  def number(key, default, low, high):
+                      value = spec.get(key, default)
+                      if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not low <= value <= high:
+                          raise ValueError("Invalid sound parameter: " + key)
+                      return float(value)
+                  frequency = number("frequency", 440, 30, 5000)
+                  duration = number("duration", 0.4, 0.05, 5)
+                  volume = number("volume", 0.5, 0, 1)
+                  attack = number("attack", 0.01, 0, 2)
+                  decay = number("decay", 0.2, 0, 5)
+                  rng = random.Random(str(spec.get("seed", name))[:128])
+                  rate = 22050
+                  target = src[:-len(".sound.json")] + ".ogg"
+                  with tempfile.NamedTemporaryFile(suffix=".wav") as temp:
+                      with wave.open(temp.name, "wb") as out:
+                          out.setnchannels(1)
+                          out.setsampwidth(2)
+                          out.setframerate(rate)
+                          pcm = bytearray()
+                          for i in range(int(rate * duration)):
+                              t = i / rate
+                              phase = (frequency * t) % 1
+                              signal = {"sine": lambda: math.sin(2 * math.pi * phase),
+                                        "triangle": lambda: 1 - 4 * abs(phase - 0.5),
+                                        "square": lambda: 1 if phase < 0.5 else -1,
+                                        "saw": lambda: 2 * phase - 1,
+                                        "noise": lambda: rng.uniform(-1, 1)}[kind]()
+                              envelope = min(1, t / max(attack, 0.0001), (duration - t) / max(decay, 0.0001))
+                              sample = max(-1, min(1, signal * volume * max(0, envelope)))
+                              pcm.extend(struct.pack("<h", int(sample * 32767)))
+                          out.writeframes(pcm)
+                      subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", temp.name, "-c:a", "libvorbis", target], check=True)
+                  os.remove(src)
+                  print("Generated sound:", target)
+          PY
+      - name: Build mod
+        working-directory: generated-mod
+        run: |
+          set +e
+          gradle --no-daemon build 2>&1 | tee build.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            # Surface compiler errors as annotations so they can be read without opening the full log.
+            grep -E "error:|\.java:[0-9]+|What went wrong|Could not|Execution failed|Caused by" build.log | head -40 | sed 's/%/%25/g' | while IFS= read -r line; do echo "::error title=Compiler::${line}"; done
+            # One detailed annotation: each error with its source line and symbol/location notes, for automatic repair.
+            detail=$(grep -E -A4 "error:" build.log | grep -v '^--$' | head -150 | sed 's#/home/runner/work/[^/]*/[^/]*/generated-mod/##' | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=CompilerDetail::${detail}"
+          fi
+          exit $status
+      - name: Send finished jar to BlockMod storage
+        run: |
+          python3 - <<'PY'
+          import glob, json, os, sys, urllib.request
+          jars = [p for p in glob.glob("generated-mod/build/libs/*.jar") if not p.endswith(("-sources.jar", "-dev.jar", "-javadoc.jar"))]
+          if len(jars) != 1:
+              raise SystemExit("Expected exactly one compiled jar, found: %r" % jars)
+          jar = jars[0]
+          size = os.path.getsize(jar)
+          print("Jar:", jar, size, "bytes")
+          if size > 25 * 1024 * 1024:
+              raise SystemExit("Jar is larger than 25 MB")
+          # GitHub-signed identity token: proves to BlockMod that this exact workflow run built the jar.
+          req = urllib.request.Request(os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"] + "&audience=blockmod",
+                                       headers={"Authorization": "Bearer " + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]})
+          oidc = json.load(urllib.request.urlopen(req, timeout=30))["value"]
+          body = json.dumps({"size": size}).encode()
+          req = urllib.request.Request("https://blockmod.floot.app/_api/build-upload-url", data=body, method="POST",
+                                       headers={"Authorization": "Bearer " + oidc, "Content-Type": "application/json", "User-Agent": "BlockForge-Build"})
+          try:
+              info = json.load(urllib.request.urlopen(req, timeout=60))
+          except urllib.error.HTTPError as e:
+              print("Upload URL request failed:", e.code, e.read().decode()[:500])
+              raise
+          data = open(jar, "rb").read()
+          put = urllib.request.Request(info["url"], data=data, method="PUT", headers=info.get("headers", {}))
+          resp = urllib.request.urlopen(put, timeout=120)
+          print("Stored jar, HTTP", resp.status)
+          PY
