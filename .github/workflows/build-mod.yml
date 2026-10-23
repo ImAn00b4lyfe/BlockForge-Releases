@@ -407,7 +407,11 @@ jobs:
             echo "::error title=RuntimeDetail::$(cat runtime.txt)"
             exit 1
           fi
-          if [ "$result" != "ok" ]; then echo "::warning title=SmokeTest::Server smoke test did not finish ($result); continuing."; fi
+          if [ "$result" != "ok" ]; then
+            tail -n 40 server.log | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}' > tail.txt
+            echo "::warning title=SmokeTestLog::$(cat tail.txt)"
+            echo "::warning title=SmokeTest::Server smoke test did not finish ($result); continuing."
+          fi
           exit 0
       - name: Send finished jar to BlockMod storage
         run: |
