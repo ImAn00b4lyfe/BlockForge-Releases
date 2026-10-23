@@ -384,6 +384,31 @@ jobs:
             echo "::error title=CompilerDetail::${detail}"
           fi
           exit $status
+      - name: Smoke test - start a Minecraft server with the mod
+        working-directory: generated-mod
+        timeout-minutes: 10
+        run: |
+          set +e
+          mkdir -p run
+          echo "eula=true" > run/eula.txt
+          printf 'online-mode=false\nspawn-protection=0\nview-distance=2\nsimulation-distance=2\nmax-tick-time=-1\n' > run/server.properties
+          (gradle --no-daemon runServer > server.log 2>&1 &)
+          result=timeout
+          for i in $(seq 1 110); do
+            sleep 5
+            if grep -qE 'Done \([0-9.]+s\)!' server.log; then result=ok; break; fi
+            if grep -qE 'Failed to load registries|Failed to start the minecraft server|Encountered an unexpected exception|Exception in thread "main"|Mixin apply failed|Could not execute entrypoint|ClassNotFoundException|NoSuchMethodError|NoClassDefFoundError' server.log; then result=bad; break; fi
+            if grep -qE 'BUILD FAILED|FAILURE: Build failed' server.log; then result=infra; break; fi
+          done
+          pkill -f KnotServer; pkill -f GradleDaemon; pkill -f gradle; sleep 2
+          echo "Smoke test result: $result"
+          if [ "$result" = "bad" ]; then
+            tail -n 400 server.log | grep -E 'ERROR|Exception|Caused by|Failed|Couldn.t parse|Unknown|No key|Missing|not found|Invalid|error' | grep -v -E 'Gradle|gradle|Download|deprecat' | head -60 | sed 's#/home/runner/work/[^/]*/[^/]*/generated-mod/##' | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}' > runtime.txt
+            echo "::error title=RuntimeDetail::$(cat runtime.txt)"
+            exit 1
+          fi
+          if [ "$result" != "ok" ]; then echo "::warning title=SmokeTest::Server smoke test did not finish ($result); continuing."; fi
+          exit 0
       - name: Send finished jar to BlockMod storage
         run: |
           python3 - <<'PY'
