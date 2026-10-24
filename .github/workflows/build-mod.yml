@@ -425,6 +425,7 @@ jobs:
           printf 'online-mode=false\nspawn-protection=0\nview-distance=2\nsimulation-distance=2\nmax-tick-time=-1\n' > run/server.properties
           if [ -f probe.txt ]; then
             rm -f in.fifo; mkfifo in.fifo
+            echo 'level-seed=424242' >> run/server.properties
             (sleep 3000 > in.fifo &)
             (gradle --no-daemon runServer < in.fifo > server.log 2>&1 &)
           else
