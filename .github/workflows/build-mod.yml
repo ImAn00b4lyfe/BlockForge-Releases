@@ -423,7 +423,13 @@ jobs:
           mkdir -p run
           echo "eula=true" > run/eula.txt
           printf 'online-mode=false\nspawn-protection=0\nview-distance=2\nsimulation-distance=2\nmax-tick-time=-1\n' > run/server.properties
-          (gradle --no-daemon runServer > server.log 2>&1 &)
+          if [ -f probe.txt ]; then
+            rm -f in.fifo; mkfifo in.fifo
+            (sleep 3000 > in.fifo &)
+            (gradle --no-daemon runServer < in.fifo > server.log 2>&1 &)
+          else
+            (gradle --no-daemon runServer > server.log 2>&1 &)
+          fi
           result=timeout
           for i in $(seq 1 110); do
             sleep 5
@@ -431,6 +437,11 @@ jobs:
             if grep -qE 'Failed to load registries|Failed to start the minecraft server|Encountered an unexpected exception|Exception in thread "main"|Mixin apply failed|Could not execute entrypoint|ClassNotFoundException|NoSuchMethodError|NoClassDefFoundError' server.log; then result=bad; break; fi
             if grep -qE 'BUILD FAILED|FAILURE: Build failed' server.log; then result=infra; break; fi
           done
+          if [ "$result" = "ok" ] && [ -f probe.txt ]; then
+            while IFS= read -r cmd; do echo "$cmd" > in.fifo; sleep 8; done < probe.txt
+            awk '/Done \(/{f=1;next} f' server.log | grep -E 'INFO\]' | grep -v -E 'Gradle|gradle' | tail -30 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}' > probe.out
+            echo "::warning title=Probe::$(cat probe.out)"
+          fi
           pkill -f KnotServer; pkill -f GradleDaemon; pkill -f gradle; sleep 2
           echo "Smoke test result: $result"
           if [ "$result" = "bad" ]; then
