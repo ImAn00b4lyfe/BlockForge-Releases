@@ -39,7 +39,7 @@ jobs:
           if raw[:2] == bytes([0x1f, 0x8b]):
               raw = gzip.decompress(raw)
           files = json.loads(raw)
-          if not isinstance(files, list) or not files or len(files) > 90:
+          if not isinstance(files, list) or not files or len(files) > 130:
               raise SystemExit("Invalid project file list")
           root = os.path.realpath("generated-mod")
           os.makedirs(root, exist_ok=True)
