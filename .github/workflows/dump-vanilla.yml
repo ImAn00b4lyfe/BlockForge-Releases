@@ -1,0 +1,21 @@
+name: Dump vanilla data names
+on: workflow_dispatch
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: List vanilla 1.21.1 placed features, biomes and loot
+        run: |
+          set -e
+          M=$(curl -s https://piston-meta.mojang.com/mc/game/version_manifest_v2.json)
+          U=$(echo "$M" | python3 -c "import sys,json;print([v['url'] for v in json.load(sys.stdin)['versions'] if v['id']=='1.21.1'][0])")
+          S=$(curl -s "$U" | python3 -c "import sys,json;print(json.load(sys.stdin)['downloads']['server']['url'])")
+          curl -sL "$S" -o server.jar
+          mkdir x && cd x && unzip -q ../server.jar
+          INNER=$(ls META-INF/versions/*/server-*.jar | head -1)
+          mkdir y && cd y && unzip -q ../$INNER && cd ..
+          for d in placed_feature configured_feature biome; do
+            ls y/data/minecraft/worldgen/$d | sed 's/.json//' | tr '\n' ' ' > /tmp/$d.txt
+            echo "::notice title=$d::$(cat /tmp/$d.txt | cut -c1-3500)"
+          done
+          ls y/data/minecraft/worldgen/placed_feature | wc -l
