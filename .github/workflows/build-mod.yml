@@ -200,7 +200,34 @@ jobs:
               if shape=="boots": return (3<=x<=6 and 2<=y<=11) or (9<=x<=12 and 2<=y<=11) or (1<=x<=6 and 12<=y<=14) or (9<=x<=14 and 12<=y<=14)
               if shape=="gem": return abs(x-7.5)+abs(y-7.5)<=6
               if shape=="orb": return (x-7.5)**2+(y-7.5)**2<=40
+              if shape=="pickaxe": return (7<=x<=8 and 5<=y<=15) or (2<=x<=13 and 2<=y<=4) or (2<=x<=3 and 5<=y<=6) or (12<=x<=13 and 5<=y<=6)
+              if shape=="shovel": return (7<=x<=8 and 6<=y<=15) or ((x-7.5)**2/12.0+(y-3.5)**2/12.0<=1)
+              if shape=="staff": return (7<=x<=8 and 4<=y<=15) or ((x-7.5)**2+(y-3)**2<=7)
+              if shape=="ingot": return (3<=x<=12 and 6<=y<=11) or (5<=x<=14 and 4<=y<=5)
+              if shape=="food": return ((x-7.5)**2+(y-9)**2<=24) or (7<=x<=8 and 2<=y<=4)
+              if shape=="shard": return abs(x-7.5)/4.0+abs(y-7.5)/7.5<=1
               return True
+          def special(shape,seed,x,y,palette):
+              hv=lambda s:hashlib.sha256(f"{seed}:{s}".encode()).digest()
+              if shape=="ore":
+                  d=hv(f"b{x//2}:{y//2}")[0]
+                  stone=[(125,125,125),(139,139,139),(108,108,108)]
+                  centers=[(int(hv(f"c{k}")[0]%13)+1,int(hv(f"c{k}")[1]%13)+1) for k in range(6)]
+                  for cx,cy in centers:
+                      if (x-cx)**2+(y-cy)**2<=3:
+                          return palette[hv(f"g{x}:{y}")[0]%len(palette)]
+                  return stone[d%3]
+              if shape=="bricks":
+                  row=y//4
+                  if y%4==3: return palette[-1]
+                  off=4 if row%2 else 0
+                  if (x+off)%8==7: return palette[-1]
+                  return palette[hv(f"k{(x+off)//8}:{row}")[0]%max(1,len(palette)-1)]
+              if shape=="lamp":
+                  if x in (0,15) or y in (0,15): return palette[-1]
+                  if x in (7,8) or y in (7,8): return palette[min(2,len(palette)-1)]
+                  return palette[1] if len(palette)>1 else palette[0]
+              return None
           for folder,_,names in os.walk(root):
               for name in names:
                   if not name.endswith(".texture.json"): continue
@@ -214,12 +241,16 @@ jobs:
                   shape=str(spec.get("shape","auto")).lower()
                   if shape=="auto":
                       shape=next((word for word in ("chestplate","leggings","helmet","boots","hammer","sword","axe","gem","orb") if word in seed.lower() or word in name.lower()),"tile")
-                  if shape not in ("tile","sword","axe","hammer","helmet","chestplate","leggings","boots","gem","orb"):
+                  if shape not in ("tile","sword","axe","hammer","helmet","chestplate","leggings","boots","gem","orb","pickaxe","shovel","staff","ingot","food","shard","ore","bricks","lamp"):
                       shape="tile"
                   rows=[]
                   for y in range(16):
                       row=bytearray([0])
                       for x in range(16):
+                          sp=special(shape,seed,x,y,palette) if shape in ("ore","bricks","lamp") else None
+                          if sp is not None:
+                              row.extend(bytes(sp)+b"\xff" if isinstance(sp,tuple) else sp+b"\xff")
+                              continue
                           if not inside(shape,x,y):
                               row.extend(b"\x00\x00\x00\x00")
                               continue
