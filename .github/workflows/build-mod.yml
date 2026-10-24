@@ -439,7 +439,16 @@ jobs:
             if grep -qE 'BUILD FAILED|FAILURE: Build failed' server.log; then result=infra; break; fi
           done
           if [ "$result" = "ok" ] && [ -f probe.txt ]; then
-            while IFS= read -r cmd; do echo "$cmd" > in.fifo; sleep 8; done < probe.txt
+            X=0; Z=0
+            while IFS= read -r cmd; do
+              cmd=${cmd//@X1/$((X+31))}; cmd=${cmd//@Z1/$((Z+31))}; cmd=${cmd//@X/$X}; cmd=${cmd//@Z/$Z}
+              echo "$cmd" > in.fifo; sleep 9
+              case "$cmd" in locate*)
+                line=$(grep 'The nearest' server.log | tail -1)
+                X=$(echo "$line" | sed -E 's/.*\[(-?[0-9]+), (-?[0-9]+), (-?[0-9]+)\].*/\1/'); Z=$(echo "$line" | sed -E 's/.*\[(-?[0-9]+), (-?[0-9]+), (-?[0-9]+)\].*/\3/')
+                case "$X$Z" in *[!0-9-]*|"") X=0; Z=0;; esac;;
+              esac
+            done < probe.txt
             awk '/Done \(/{f=1;next} f' server.log | grep -E 'INFO\]' | grep -v -E 'Gradle|gradle' | tail -30 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}' > probe.out
             echo "::warning title=Probe::$(cat probe.out)"
           fi
