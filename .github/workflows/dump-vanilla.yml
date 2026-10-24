@@ -14,8 +14,17 @@ jobs:
           mkdir x && cd x && unzip -q ../server.jar
           INNER=$(ls META-INF/versions/*/server-*.jar | head -1)
           mkdir y && cd y && unzip -q ../$INNER && cd ..
-          for d in placed_feature configured_feature biome; do
-            ls y/data/minecraft/worldgen/$d | sed 's/.json//' | tr '\n' ' ' > /tmp/$d.txt
-            echo "::notice title=$d::$(cat /tmp/$d.txt | cut -c1-3500)"
+          for d in worldgen/placed_feature worldgen/biome loot_table/blocks loot_table/entities; do
+            n=$(echo $d | tr '/' '_')
+            ls y/data/minecraft/$d | sed 's/.json//' | tr '\n' ' ' > /tmp/$n.txt
+            python3 - "$n" <<'PY'
+          import sys
+          n=sys.argv[1]; w=open('/tmp/%s.txt'%n).read().split()
+          chunk=[];size=0;k=0
+          for x in w:
+              if size+len(x)+1>3000:
+                  print('::notice title=%s_%d::%s'%(n,k,' '.join(chunk))); chunk=[];size=0;k+=1
+              chunk.append(x);size+=len(x)+1
+          print('::notice title=%s_%d::%s'%(n,k,' '.join(chunk)))
+          PY
           done
-          ls y/data/minecraft/worldgen/placed_feature | wc -l
