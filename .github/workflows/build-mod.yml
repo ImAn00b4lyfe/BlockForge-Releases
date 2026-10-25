@@ -255,8 +255,11 @@ jobs:
                               row.extend(b"\x00\x00\x00\x00")
                               continue
                           h=hashlib.sha256(f"{seed}:{x//3}:{y//3}".encode()).digest()[0]
+                          if shape=="tile" and len(palette)>1:
+                              g=hashlib.sha256(f"{seed}:{x//2}:{y//2}".encode()).digest()[0]%10
+                              h=0 if g<6 else (1 if g<8 else min(2,len(palette)-1))
                           edge=not all(inside(shape,x+dx,y+dy) for dx,dy in ((-1,0),(1,0),(0,-1),(0,1)))
-                          highlight=(x+y)%9==0 or (x<7 and y%5==0)
+                          highlight=(shape!="tile") and ((x+y)%9==0 or (x<7 and y%5==0))
                           index=(len(palette)-1 if edge and len(palette)>2 else (1 if highlight and len(palette)>1 else h%len(palette)))
                           row.extend(palette[index]+b"\xff")
                       rows.append(bytes(row))
