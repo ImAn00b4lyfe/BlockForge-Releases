@@ -485,7 +485,7 @@ jobs:
                                        headers={"Authorization": "Bearer " + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]})
           oidc = json.load(urllib.request.urlopen(req, timeout=30))["value"]
           body = json.dumps({"size": size}).encode()
-          req = urllib.request.Request("https://blockmod.floot.app/_api/build-upload-url", data=body, method="POST",
+          req = urllib.request.Request("https://blockmod.net/_api/build-upload-url", data=body, method="POST",
                                        headers={"Authorization": "Bearer " + oidc, "Content-Type": "application/json", "User-Agent": "BlockForge-Build"})
           try:
               info = json.load(urllib.request.urlopen(req, timeout=60))
