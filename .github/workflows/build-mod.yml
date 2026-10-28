@@ -493,7 +493,7 @@ jobs:
               print("Upload URL request failed:", e.code, e.read().decode()[:500])
               raise
           data = open(jar, "rb").read()
-          put = urllib.request.Request(info["url"], data=data, method="PUT", headers=info.get("headers", {}))
+          put = urllib.request.Request(info["url"], data=data, method="PUT", headers={**info.get("headers", {}), "User-Agent": "BlockForge-Build"})
           resp = urllib.request.urlopen(put, timeout=120)
           print("Stored jar, HTTP", resp.status)
           PY
